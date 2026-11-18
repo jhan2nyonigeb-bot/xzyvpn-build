@@ -1,9 +1,10 @@
 name: Build Slipstream Android ARM64 Client (Experimental)
 
 # Self-contained native-build workflow; NO XzyVpn Android app source required.
-# Fix v2: Cross-compile OpenSSL for Android ARM64, then build only the
+# Cross-compile OpenSSL for Android ARM64, then build only the
 # archived slipstream-rust client with cargo-ndk. Installing Ubuntu's
 # libssl-dev is not enough for an Android-target openssl-sys crate.
+# Cargo NDK API level is set via CARGO_NDK_PLATFORM; -p means package.
 # Upstream protocol compatibility and Android runtime execution still require
 # testing on a real phone/server.
 on:
@@ -103,6 +104,7 @@ jobs:
           CMAKE_PREFIX_PATH: ${{ github.workspace }}/openssl-arm64
           PKG_CONFIG_ALLOW_CROSS: '1'
           PKG_CONFIG_PATH: ${{ github.workspace }}/openssl-arm64/lib/pkgconfig
+          CARGO_NDK_PLATFORM: '24'
           RUSTFLAGS: '-C link-arg=-Wl,-z,max-page-size=16384'
         run: |
           set -euo pipefail
@@ -110,7 +112,7 @@ jobs:
           test -s "$OPENSSL_LIB_DIR/libssl.a"
           test -f Cargo.toml
           cargo locate-project --message-format plain
-          cargo ndk -t arm64-v8a -p 24 build --release --locked \
+          cargo ndk -t arm64-v8a build --release --locked \
             -p slipstream-client
 
       - name: Validate ARM64 client and package license
