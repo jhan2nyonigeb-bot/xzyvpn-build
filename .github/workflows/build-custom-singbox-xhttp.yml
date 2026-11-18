@@ -53,7 +53,10 @@ jobs:
           java-version: '17'
 
       - name: Install Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
+        with:
+          # The old v3 default requested Google's removed "tools" package.
+          packages: 'platform-tools'
 
       - name: Install Android NDK r28
         id: setup-ndk
@@ -116,13 +119,37 @@ jobs:
           name: XzyVpn-Custom-SingBox-XHTTP-ARM64
           path: custom-libbox
 
-      - name: Replace the official AAR only for this build
+      - name: Inspect downloaded artifact and replace official AAR
         shell: bash
         run: |
-          test -s custom-libbox/libbox-legacy-android21-arm64.aar
-          cp custom-libbox/libbox-legacy-android21-arm64.aar app/libs/libbox-legacy-android21-arm64.aar
-          cp custom-libbox/XHTTP_FORK_LICENSE.txt app/src/main/assets/XHTTP_FORK_LICENSE.txt
-          cp custom-libbox/XHTTP_FORK_NOTICE.md app/src/main/assets/XHTTP_FORK_NOTICE.md
+          set -euo pipefail
+          echo 'Downloaded XHTTP artifact files:'
+          find custom-libbox -maxdepth 6 -type f -print | sort
+
+          # Artifact extraction may preserve a dist/ or other parent directory.
+          # Require exactly one SDK-21 ARM64 library, never silently use API-24.
+          mapfile -t native_libs < <(find custom-libbox -type f \
+            \( -name 'libbox-legacy-android21-arm64.aar' -o -name 'libbox-legacy.aar' \))
+          if [[ ${#native_libs[@]} -ne 1 ]]; then
+            echo "Expected one ARM64 legacy libbox AAR; found ${#native_libs[@]}" >&2
+            exit 1
+          fi
+          unzip -tq "${native_libs[0]}" > /dev/null
+          unzip -Z1 "${native_libs[0]}" | grep -Fxq 'jni/arm64-v8a/libbox.so'
+          test -d app/libs || { echo 'XzyVpn app/libs is missing from this repository' >&2; exit 1; }
+          cp "${native_libs[0]}" app/libs/libbox-legacy-android21-arm64.aar
+
+          mkdir -p xhttp-build-info app/src/main/assets
+          for filename in XHTTP_FORK_LICENSE.txt XHTTP_FORK_NOTICE.md XHTTP_SOURCE_COMMIT.txt SHA256SUMS.txt; do
+            mapfile -t matches < <(find custom-libbox -type f -name "$filename")
+            if [[ ${#matches[@]} -ne 1 ]]; then
+              echo "Expected one $filename in downloaded artifact; found ${#matches[@]}" >&2
+              exit 1
+            fi
+            cp "${matches[0]}" "xhttp-build-info/$filename"
+          done
+          cp xhttp-build-info/XHTTP_FORK_LICENSE.txt app/src/main/assets/XHTTP_FORK_LICENSE.txt
+          cp xhttp-build-info/XHTTP_FORK_NOTICE.md app/src/main/assets/XHTTP_FORK_NOTICE.md
           sha256sum app/libs/libbox-legacy-android21-arm64.aar
 
       - name: Set up Java 21 for Gradle
@@ -133,7 +160,9 @@ jobs:
           cache: gradle
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools'
 
       - name: Install Android SDK 36
         run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
@@ -149,8 +178,8 @@ jobs:
           name: XzyVpn-v0.61-Custom-XHTTP-Debug-ARM64
           path: |
             app/build/outputs/apk/debug/*.apk
-            custom-libbox/XHTTP_SOURCE_COMMIT.txt
-            custom-libbox/SHA256SUMS.txt
-            custom-libbox/XHTTP_FORK_LICENSE.txt
-            custom-libbox/XHTTP_FORK_NOTICE.md
+            xhttp-build-info/XHTTP_SOURCE_COMMIT.txt
+            xhttp-build-info/SHA256SUMS.txt
+            xhttp-build-info/XHTTP_FORK_LICENSE.txt
+            xhttp-build-info/XHTTP_FORK_NOTICE.md
           if-no-files-found: error
