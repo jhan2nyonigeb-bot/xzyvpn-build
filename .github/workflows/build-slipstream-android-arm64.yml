@@ -1,0 +1,103 @@
+name: Build Slipstream Android ARM64 Client (Experimental)
+
+# Self-contained native-build workflow; NO XzyVpn Android app source required.
+# This builds the archived slipstream-rust CLI via the Android build script
+# maintained by dnstt-xyz/dnstt_xyz_app. Upstream protocol compatibility and
+# Android runtime execution still require testing on a real phone/server.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  slipstream_client:
+    name: Cross-compile Slipstream for Android ARM64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout publicly available Android Slipstream build scripts
+        uses: actions/checkout@v4
+        with:
+          repository: dnstt-xyz/dnstt_xyz_app
+          ref: main
+          path: upstream
+          submodules: recursive
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check source and record exact revisions
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f upstream/scripts/build_slipstream_android.sh
+          test -f upstream/vendor/slipstream-rust/Cargo.toml
+          git -C upstream rev-parse HEAD
+          git -C upstream submodule status
+
+      - name: Install native compiler prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build clang llvm binutils \
+            pkg-config libssl-dev make perl python3
+
+      - name: Install Android SDK without obsolete tools package
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools'
+
+      - name: Install Android NDK r28
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r28
+
+      - name: Install Rust Android build toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - name: Install cargo-ndk
+        shell: bash
+        run: cargo install cargo-ndk --locked
+
+      - name: Build Slipstream Android native executables
+        shell: bash
+        working-directory: upstream
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+          NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          set -euo pipefail
+          bash scripts/build_slipstream_android.sh
+
+      - name: Validate ARM64 client and package license
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary=upstream/android/app/src/main/jniLibs/arm64-v8a/libslipstream_client.so
+          test -s "$binary"
+          test -f upstream/vendor/slipstream-rust/LICENSE
+          mkdir -p dist
+          cp "$binary" dist/libslipstream_client.so
+          cp upstream/vendor/slipstream-rust/LICENSE dist/SLIPSTREAM_RUST_LICENSE.txt
+          file dist/libslipstream_client.so | tee dist/BINARY_INFO.txt
+          readelf -h dist/libslipstream_client.so | grep -Eq 'Machine:.*AArch64'
+          git -C upstream rev-parse HEAD > dist/ANDROID_BUILD_SOURCE_COMMIT.txt
+          git -C upstream submodule status > dist/UPSTREAM_SUBMODULE_COMMITS.txt
+          printf '%s\n' 'Build scripts: https://github.com/dnstt-xyz/dnstt_xyz_app' \
+            'Native core: https://github.com/Mygod/slipstream-rust (archived Aug 2026)' \
+            'ABI: Android arm64-v8a' \
+            'Experimental binary: native build success DOES NOT prove server compatibility or VPN connectivity.' \
+            'For real-device operation AndroidManifest must extract native libraries.' > dist/BUILD_NOTES.txt
+          (cd dist && sha256sum libslipstream_client.so > SHA256SUMS.txt)
+
+      - name: Upload Slipstream ARM64 client
+        uses: actions/upload-artifact@v4
+        with:
+          name: XzyVpn-Slipstream-Android-ARM64-Experimental
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30

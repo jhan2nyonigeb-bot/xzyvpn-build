@@ -1,0 +1,67 @@
+name: Build DNSTT Android ARM64 Client
+
+# Upload ONLY this .yml to the workflow-only GitHub repository.
+# The repository does not need XzyVpn source code, Gradle, or an Android SDK.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dnstt_client:
+    name: Compile official DNSTT client for Android ARM64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Fetch official upstream DNSTT release
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch v1.20260501.0 https://repo.or.cz/dnstt.git upstream-dnstt
+          test -f upstream-dnstt/go.mod
+          test -f upstream-dnstt/dnstt-client/main.go
+          git -C upstream-dnstt rev-parse HEAD
+
+      - name: Set up Go from upstream go.mod
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: upstream-dnstt/go.mod
+          cache: true
+          cache-dependency-path: upstream-dnstt/go.sum
+
+      - name: Cross-compile Android ARM64 executable
+        shell: bash
+        working-directory: upstream-dnstt
+        env:
+          GOOS: android
+          GOARCH: arm64
+          CGO_ENABLED: '0'
+        run: |
+          set -euo pipefail
+          mkdir -p ../dist
+          go build -trimpath -ldflags='-s -w' -o ../dist/libdnstt_client.so ./dnstt-client
+
+      - name: Validate binary and record source attribution
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s dist/libdnstt_client.so
+          file dist/libdnstt_client.so | tee dist/BINARY_INFO.txt
+          readelf -h dist/libdnstt_client.so | grep -Eq 'Machine:.*AArch64'
+          cp upstream-dnstt/COPYING dist/DNSTT_COPYING.txt
+          git -C upstream-dnstt rev-parse HEAD > dist/DNSTT_SOURCE_COMMIT.txt
+          printf '%s\n' 'Upstream: https://repo.or.cz/dnstt.git' \
+            'Tag: v1.20260501.0' \
+            'ABI: Android arm64-v8a (Go GOOS=android GOARCH=arm64 CGO_ENABLED=0)' \
+            'This is a command-line executable named .so for Android native-library extraction.' \
+            'Not yet connected to XzyVpn or tested as a live VPN.' > dist/BUILD_NOTES.txt
+          (cd dist && sha256sum libdnstt_client.so > SHA256SUMS.txt)
+
+      - name: Upload DNSTT ARM64 client
+        uses: actions/upload-artifact@v4
+        with:
+          name: XzyVpn-DNSTT-Android-ARM64
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
