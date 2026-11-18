@@ -88,7 +88,9 @@ jobs:
 
       - name: Build only the Slipstream ARM64 client
         shell: bash
-        working-directory: upstream
+        # cargo-ndk calls cargo metadata before forwarding 'build' options;
+        # run from the directory containing the workspace Cargo.toml.
+        working-directory: upstream/vendor/slipstream-rust
         env:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
           ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
@@ -106,8 +108,9 @@ jobs:
           set -euo pipefail
           export PATH="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
           test -s "$OPENSSL_LIB_DIR/libssl.a"
+          test -f Cargo.toml
+          cargo locate-project --message-format plain
           cargo ndk -t arm64-v8a -p 24 build --release --locked \
-            --manifest-path vendor/slipstream-rust/Cargo.toml \
             -p slipstream-client
 
       - name: Validate ARM64 client and package license
