@@ -72,7 +72,10 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
-          git clone --depth 1 --branch openssl-3.5.10 https://github.com/openssl/openssl.git openssl-android-src
+          # 3.5.10 is mentioned in some security notices but is not present
+          # as a published GitHub tag. Use the maintained stable 3.5 branch.
+          git clone --depth 1 --branch openssl-3.5 https://github.com/openssl/openssl.git openssl-android-src
+          git -C openssl-android-src rev-parse HEAD
           cd openssl-android-src
           ./Configure android-arm64 -D__ANDROID_API__=24 \
             no-shared no-tests \
@@ -121,9 +124,10 @@ jobs:
           readelf -h dist/libslipstream_client.so | grep -Eq 'Machine:.*AArch64'
           git -C upstream rev-parse HEAD > dist/ANDROID_BUILD_SOURCE_COMMIT.txt
           git -C upstream submodule status > dist/UPSTREAM_SUBMODULE_COMMITS.txt
+          git -C openssl-android-src rev-parse HEAD > dist/OPENSSL_SOURCE_COMMIT.txt
           printf '%s\n' 'Build scripts: https://github.com/dnstt-xyz/dnstt_xyz_app' \
             'Native core: https://github.com/Mygod/slipstream-rust (archived Aug 2026)' \
-            'OpenSSL: openssl-3.5.10, built statically for Android ARM64' \
+            'OpenSSL: maintained openssl-3.5 branch, built statically for Android ARM64' \
             'ABI: Android arm64-v8a' \
             'Experimental binary: native build success DOES NOT prove server compatibility or VPN connectivity.' \
             'For real-device operation AndroidManifest must extract native libraries.' > dist/BUILD_NOTES.txt
