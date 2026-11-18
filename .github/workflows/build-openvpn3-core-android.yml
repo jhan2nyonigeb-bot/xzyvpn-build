@@ -1,0 +1,155 @@
+name: Build official OpenVPN 3 Core 3.11.8 for XzyVpn Android
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  openvpn3-android-arm64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Download pinned official OpenVPN 3 stable source
+        uses: actions/checkout@v4
+        with:
+          repository: OpenVPN/openvpn3
+          ref: 4f3bdef73245d4ee9e8216c5d65baccc9568f6ef
+          path: openvpn3
+          persist-credentials: false
+
+      - name: Download pinned vcpkg from OpenVPN 3 upstream CI
+        uses: actions/checkout@v4
+        with:
+          repository: microsoft/vcpkg
+          ref: 74ec888e385d189b42d6b398d0bbaa6f1b1d3b0e
+          path: vcpkg
+          persist-credentials: false
+
+      - name: Install Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install SWIG and Ninja
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends swig ninja-build cmake pkg-config zip
+          swig -version
+          cmake --version
+
+      - name: Install Android NDK using GitHub runner SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$ANDROID_HOME"
+          manager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          test -x "$manager"
+          "$manager" --sdk_root="$ANDROID_HOME" --install 'ndk;27.2.12479018'
+          ndk="$ANDROID_HOME/ndk/27.2.12479018"
+          test -x "$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang++"
+          echo "ANDROID_NDK_HOME=$ndk" >> "$GITHUB_ENV"
+
+      - name: Confirm pinned stable OpenVPN 3 revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F '"3.11.8"' openvpn3/openvpn/common/version.hpp
+          test -s openvpn3/client/ovpncli.i
+          test -s openvpn3/client/ovpncli.cpp
+          test -s openvpn3/LICENSE.md
+          git -C openvpn3 rev-parse HEAD
+
+      - name: Build Android arm64 OpenVPN dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
+          ./vcpkg/vcpkg install asio lz4 openssl \
+            --triplet arm64-android \
+            --x-install-root="$GITHUB_WORKSPACE/vcpkg_installed"
+
+      - name: Generate official OpenVPN 3 Java SWIG bindings
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p generated/java generated/cpp
+          swig -c++ -java \
+            -package com.xzy23re.dev.openvpn3 \
+            -Iopenvpn3 -Iopenvpn3/client \
+            -outdir generated/java \
+            -o generated/cpp/ovpncli_wrap.cxx \
+            openvpn3/client/ovpncli.i
+          test -s generated/cpp/ovpncli_wrap.cxx
+          test -s generated/java/ovpncliJNI.java
+
+      - name: Create minimal Android CMake native JNI build
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p native-build
+          cat > native-build/CMakeLists.txt <<'OPENVPN3_CMAKE'
+          cmake_minimum_required(VERSION 3.22)
+          project(xzyvpn_openvpn3 LANGUAGES C CXX)
+          set(CMAKE_CXX_STANDARD 20)
+          set(CMAKE_CXX_STANDARD_REQUIRED ON)
+          find_package(asio CONFIG REQUIRED)
+          find_package(lz4 CONFIG REQUIRED)
+          find_package(OpenSSL REQUIRED)
+          add_library(ovpncli SHARED
+            "$ENV{GITHUB_WORKSPACE}/openvpn3/client/ovpncli.cpp"
+            "$ENV{GITHUB_WORKSPACE}/openvpn3/openvpn/crypto/data_epoch.cpp"
+            "$ENV{GITHUB_WORKSPACE}/generated/cpp/ovpncli_wrap.cxx")
+          target_include_directories(ovpncli PRIVATE
+            "$ENV{GITHUB_WORKSPACE}/openvpn3"
+            "$ENV{GITHUB_WORKSPACE}/openvpn3/client")
+          target_compile_definitions(ovpncli PRIVATE
+            ASIO_STANDALONE USE_ASIO HAVE_LZ4 USE_OPENSSL)
+          target_link_libraries(ovpncli PRIVATE
+            asio::asio lz4::lz4 OpenSSL::SSL OpenSSL::Crypto)
+          target_link_options(ovpncli PRIVATE "-Wl,-z,max-page-size=16384")
+          OPENVPN3_CMAKE
+
+      - name: Configure and compile OpenVPN 3 ARM64 JNI library
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S native-build -B build-android -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/vcpkg/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_CHAINLOAD_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+            -DVCPKG_TARGET_TRIPLET=arm64-android \
+            -DVCPKG_INSTALLED_DIR="$GITHUB_WORKSPACE/vcpkg_installed" \
+            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-21 \
+            -DANDROID_STL=c++_shared
+          cmake --build build-android --parallel 2
+          test -s build-android/libovpncli.so
+
+      - name: Build Java binding JAR and package license
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p output/arm64-v8a output/java output/classes
+          cp build-android/libovpncli.so output/arm64-v8a/
+          cp "$ANDROID_NDK_HOME/sources/cxx-stl/llvm-libc++/libs/arm64-v8a/libc++_shared.so" output/arm64-v8a/
+          cp generated/java/*.java output/java/
+          javac -encoding UTF-8 -d output/classes generated/java/*.java
+          jar --create --file output/openvpn3-java.jar -C output/classes .
+          cp openvpn3/LICENSE.md output/OPENVPN3_LICENSE.md
+          cp openvpn3/LICENSES/MPL-2.0.txt output/MPL-2.0.txt
+          printf 'Official OpenVPN 3 Core 3.11.8, pinned source commit 4f3bdef73245d4ee9e8216c5d65baccc9568f6ef.\nJNI library and generated Java bindings only. XzyVpn Android VpnService callbacks, packet routing, socket protection, and runtime connection have NOT been implemented or tested by this action.\n' > output/BUILD_NOTES.txt
+          (cd output && sha256sum arm64-v8a/*.so openvpn3-java.jar > SHA256SUMS.txt)
+          "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -h output/arm64-v8a/libovpncli.so | grep AArch64
+          "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -d output/arm64-v8a/libovpncli.so | grep NEEDED
+
+      - name: Upload official OpenVPN 3 Android JNI build
+        uses: actions/upload-artifact@v4
+        with:
+          name: xzyvpn-openvpn3-core-3.11.8-android-arm64
+          path: output/
+          if-no-files-found: error
+          retention-days: 14
