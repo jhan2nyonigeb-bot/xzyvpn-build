@@ -8,6 +8,8 @@ name: Build Slipstream Android ARM64 Client (Experimental)
 # The upstream picoquic CMake script supports OPENSSL_CRYPTO_LIBRARY and
 # OPENSSL_SSL_LIBRARY explicitly; set both so Android's sysroot search does
 # not hide our separately built ARM64 static OpenSSL archives.
+# slipstream-ffi's custom C build falls back to the Ubuntu host compiler
+# unless RUST_ANDROID_GRADLE_CC / RUST_ANDROID_GRADLE_AR are explicitly set.
 # Upstream protocol compatibility and Android runtime execution still require
 # testing on a real phone/server.
 on:
@@ -99,6 +101,8 @@ jobs:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
           ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
           NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+          RUST_ANDROID_GRADLE_CC: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
+          RUST_ANDROID_GRADLE_AR: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
           OPENSSL_DIR: ${{ github.workspace }}/openssl-arm64
           OPENSSL_LIB_DIR: ${{ github.workspace }}/openssl-arm64/lib
           OPENSSL_INCLUDE_DIR: ${{ github.workspace }}/openssl-arm64/include
@@ -120,6 +124,11 @@ jobs:
           test -s "$OPENSSL_SSL_LIBRARY"
           test -f scripts/build_picoquic.sh
           test -f Cargo.toml
+          test -x "$RUST_ANDROID_GRADLE_CC"
+          test -x "$RUST_ANDROID_GRADLE_AR"
+          printf 'int slipstream_arm64_probe(void) { return 0; }\n' | \
+            "$RUST_ANDROID_GRADLE_CC" -x c -c -o "$RUNNER_TEMP/slipstream-arm64-probe.o" -
+          readelf -h "$RUNNER_TEMP/slipstream-arm64-probe.o" | grep -Eq 'Machine:.*AArch64'
           cargo locate-project --message-format plain
           cargo ndk -t arm64-v8a build --release --locked \
             -p slipstream-client
