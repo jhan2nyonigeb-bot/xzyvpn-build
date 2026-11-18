@@ -1,0 +1,161 @@
+name: Build XzyVpn Custom sing-box XHTTP ARM64
+
+on:
+  workflow_dispatch:
+
+# Builds experimental, third-party XHTTP code. No write token or secrets needed.
+permissions:
+  contents: read
+
+concurrency:
+  group: custom-singbox-xhttp-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  xhttp_libbox:
+    name: Compile XHTTP Android ARM64 libbox
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout XzyVpn
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Checkout experimental XHTTP transport fork
+        uses: actions/checkout@v4
+        with:
+          repository: flyzstu/xhttp-box
+          ref: dev-next
+          path: custom-core
+          persist-credentials: false
+
+      - name: Verify source contains XHTTP and record revision
+        shell: bash
+        run: |
+          test -d custom-core/transport/v2rayxhttp
+          test -f custom-core/cmd/internal/build_libbox/main.go
+          git -C custom-core rev-parse HEAD
+          git -C custom-core log -1 --format='%cI %s'
+          sed -n '1,5p' custom-core/go.mod
+
+      - name: Set up Go from fork go.mod
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: custom-core/go.mod
+          cache: true
+          cache-dependency-path: custom-core/go.sum
+
+      - name: Set up Java 17 for upstream gomobile builder
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          # The old v3 default requested Google's removed "tools" package.
+          packages: 'platform-tools'
+
+      - name: Install Android NDK r28
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r28
+
+      - name: Test XHTTP implementation
+        working-directory: custom-core
+        run: |
+          go test ./transport/v2rayxhttp
+          go test -tags with_quic ./transport/v2rayxhttp
+          go test -tags with_utls ./transport/v2rayxhttp
+
+      - name: Compile Android ARM64 AAR
+        working-directory: custom-core
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          make lib_install
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          go run ./cmd/internal/build_libbox -target android -platform android/arm64
+
+      - name: Validate Android library and package notices
+        shell: bash
+        run: |
+          test -s custom-core/libbox-legacy.aar
+          test -s custom-core/libbox.aar
+          unzip -l custom-core/libbox-legacy.aar | grep -F 'jni/arm64-v8a/libbox.so'
+          mkdir -p dist
+          cp custom-core/libbox-legacy.aar dist/libbox-legacy-android21-arm64.aar
+          cp custom-core/libbox.aar dist/libbox-android24-arm64.aar
+          cp custom-core/LICENSE dist/XHTTP_FORK_LICENSE.txt
+          cp custom-core/NOTICE.md dist/XHTTP_FORK_NOTICE.md
+          git -C custom-core rev-parse HEAD > dist/XHTTP_SOURCE_COMMIT.txt
+          sha256sum dist/*.aar > dist/SHA256SUMS.txt
+
+      - name: Upload custom libbox for XzyVpn
+        uses: actions/upload-artifact@v4
+        with:
+          name: XzyVpn-Custom-SingBox-XHTTP-ARM64
+          path: dist/
+          if-no-files-found: error
+          compression-level: 0
+
+  xzyvpn_apk:
+    name: Build XzyVpn with verified XHTTP AAR
+    needs: xhttp_libbox
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout XzyVpn
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download compiled XHTTP library
+        uses: actions/download-artifact@v4
+        with:
+          name: XzyVpn-Custom-SingBox-XHTTP-ARM64
+          path: custom-libbox
+
+      - name: Replace the official AAR only for this build
+        shell: bash
+        run: |
+          test -s custom-libbox/libbox-legacy-android21-arm64.aar
+          cp custom-libbox/libbox-legacy-android21-arm64.aar app/libs/libbox-legacy-android21-arm64.aar
+          cp custom-libbox/XHTTP_FORK_LICENSE.txt app/src/main/assets/XHTTP_FORK_LICENSE.txt
+          cp custom-libbox/XHTTP_FORK_NOTICE.md app/src/main/assets/XHTTP_FORK_NOTICE.md
+          sha256sum app/libs/libbox-legacy-android21-arm64.aar
+
+      - name: Set up Java 21 for Gradle
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools'
+
+      - name: Install Android SDK 36
+        run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
+
+      - name: Build debug APK with XHTTP enabled
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleDebug -PxhttpEnabled=true --no-daemon --stacktrace
+
+      - name: Upload test APK and source attribution
+        uses: actions/upload-artifact@v4
+        with:
+          name: XzyVpn-v0.61-Custom-XHTTP-Debug-ARM64
+          path: |
+            app/build/outputs/apk/debug/*.apk
+            custom-libbox/XHTTP_SOURCE_COMMIT.txt
+            custom-libbox/SHA256SUMS.txt
+            custom-libbox/XHTTP_FORK_LICENSE.txt
+            custom-libbox/XHTTP_FORK_NOTICE.md
+          if-no-files-found: error
