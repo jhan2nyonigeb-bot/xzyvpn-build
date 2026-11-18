@@ -1,9 +1,11 @@
 name: Build Slipstream Android ARM64 Client (Experimental)
 
 # Self-contained native-build workflow; NO XzyVpn Android app source required.
-# This builds the archived slipstream-rust CLI via the Android build script
-# maintained by dnstt-xyz/dnstt_xyz_app. Upstream protocol compatibility and
-# Android runtime execution still require testing on a real phone/server.
+# Fix v2: Cross-compile OpenSSL for Android ARM64, then build only the
+# archived slipstream-rust client with cargo-ndk. Installing Ubuntu's
+# libssl-dev is not enough for an Android-target openssl-sys crate.
+# Upstream protocol compatibility and Android runtime execution still require
+# testing on a real phone/server.
 on:
   workflow_dispatch:
 
@@ -54,30 +56,62 @@ jobs:
         with:
           ndk-version: r28
 
-      - name: Install Rust Android build toolchain
+      - name: Install Rust Android ARM64 toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+          targets: aarch64-linux-android
 
       - name: Install cargo-ndk
         shell: bash
         run: cargo install cargo-ndk --locked
 
-      - name: Build Slipstream Android native executables
+      - name: Build OpenSSL for Android ARM64 (not Ubuntu)
+        shell: bash
+        env:
+          ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          set -euo pipefail
+          export PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+          git clone --depth 1 --branch openssl-3.5.10 https://github.com/openssl/openssl.git openssl-android-src
+          cd openssl-android-src
+          ./Configure android-arm64 -D__ANDROID_API__=24 \
+            no-shared no-tests \
+            --prefix="$GITHUB_WORKSPACE/openssl-arm64" --libdir=lib
+          make -j2
+          make install_sw
+          test -s "$GITHUB_WORKSPACE/openssl-arm64/lib/libssl.a"
+          test -s "$GITHUB_WORKSPACE/openssl-arm64/lib/libcrypto.a"
+          test -f "$GITHUB_WORKSPACE/openssl-arm64/include/openssl/ssl.h"
+
+      - name: Build only the Slipstream ARM64 client
         shell: bash
         working-directory: upstream
         env:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+          ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
           NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+          OPENSSL_DIR: ${{ github.workspace }}/openssl-arm64
+          OPENSSL_LIB_DIR: ${{ github.workspace }}/openssl-arm64/lib
+          OPENSSL_INCLUDE_DIR: ${{ github.workspace }}/openssl-arm64/include
+          OPENSSL_STATIC: '1'
+          OPENSSL_ROOT_DIR: ${{ github.workspace }}/openssl-arm64
+          CMAKE_PREFIX_PATH: ${{ github.workspace }}/openssl-arm64
+          PKG_CONFIG_ALLOW_CROSS: '1'
+          PKG_CONFIG_PATH: ${{ github.workspace }}/openssl-arm64/lib/pkgconfig
+          RUSTFLAGS: '-C link-arg=-Wl,-z,max-page-size=16384'
         run: |
           set -euo pipefail
-          bash scripts/build_slipstream_android.sh
+          export PATH="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+          test -s "$OPENSSL_LIB_DIR/libssl.a"
+          cargo ndk -t arm64-v8a -p 24 build --release --locked \
+            --manifest-path vendor/slipstream-rust/Cargo.toml \
+            -p slipstream-client
 
       - name: Validate ARM64 client and package license
         shell: bash
         run: |
           set -euo pipefail
-          binary=upstream/android/app/src/main/jniLibs/arm64-v8a/libslipstream_client.so
+          binary=upstream/vendor/slipstream-rust/target/aarch64-linux-android/release/slipstream-client
           test -s "$binary"
           test -f upstream/vendor/slipstream-rust/LICENSE
           mkdir -p dist
@@ -89,6 +123,7 @@ jobs:
           git -C upstream submodule status > dist/UPSTREAM_SUBMODULE_COMMITS.txt
           printf '%s\n' 'Build scripts: https://github.com/dnstt-xyz/dnstt_xyz_app' \
             'Native core: https://github.com/Mygod/slipstream-rust (archived Aug 2026)' \
+            'OpenSSL: openssl-3.5.10, built statically for Android ARM64' \
             'ABI: Android arm64-v8a' \
             'Experimental binary: native build success DOES NOT prove server compatibility or VPN connectivity.' \
             'For real-device operation AndroidManifest must extract native libraries.' > dist/BUILD_NOTES.txt
