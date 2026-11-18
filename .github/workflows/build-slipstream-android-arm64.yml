@@ -5,6 +5,9 @@ name: Build Slipstream Android ARM64 Client (Experimental)
 # archived slipstream-rust client with cargo-ndk. Installing Ubuntu's
 # libssl-dev is not enough for an Android-target openssl-sys crate.
 # Cargo NDK API level is set via CARGO_NDK_PLATFORM; -p means package.
+# The upstream picoquic CMake script supports OPENSSL_CRYPTO_LIBRARY and
+# OPENSSL_SSL_LIBRARY explicitly; set both so Android's sysroot search does
+# not hide our separately built ARM64 static OpenSSL archives.
 # Upstream protocol compatibility and Android runtime execution still require
 # testing on a real phone/server.
 on:
@@ -99,6 +102,9 @@ jobs:
           OPENSSL_DIR: ${{ github.workspace }}/openssl-arm64
           OPENSSL_LIB_DIR: ${{ github.workspace }}/openssl-arm64/lib
           OPENSSL_INCLUDE_DIR: ${{ github.workspace }}/openssl-arm64/include
+          OPENSSL_CRYPTO_LIBRARY: ${{ github.workspace }}/openssl-arm64/lib/libcrypto.a
+          OPENSSL_SSL_LIBRARY: ${{ github.workspace }}/openssl-arm64/lib/libssl.a
+          OPENSSL_USE_STATIC_LIBS: 'TRUE'
           OPENSSL_STATIC: '1'
           OPENSSL_ROOT_DIR: ${{ github.workspace }}/openssl-arm64
           CMAKE_PREFIX_PATH: ${{ github.workspace }}/openssl-arm64
@@ -110,6 +116,9 @@ jobs:
           set -euo pipefail
           export PATH="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
           test -s "$OPENSSL_LIB_DIR/libssl.a"
+          test -s "$OPENSSL_CRYPTO_LIBRARY"
+          test -s "$OPENSSL_SSL_LIBRARY"
+          test -f scripts/build_picoquic.sh
           test -f Cargo.toml
           cargo locate-project --message-format plain
           cargo ndk -t arm64-v8a build --release --locked \
