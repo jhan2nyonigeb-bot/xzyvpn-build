@@ -1,0 +1,273 @@
+name: Build latest Xray and V2Fly cores for XzyVpn
+
+# Run on demand. Each run resolves the newest official GitHub RELEASE (not HEAD).
+# This workflow is standalone: xzyvpn-build contains ONLY .github/workflows.
+# Core binaries become downloadable artifacts, no app source or write token needed.
+on:
+  workflow_dispatch:
+    inputs:
+      cores:
+        description: Official engine(s) to compile
+        required: true
+        default: both
+        type: choice
+        options:
+          - both
+          - xray
+          - v2ray
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-protocol-cores-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  xray_arm64:
+    if: ${{ inputs.cores == 'both' || inputs.cores == 'xray' }}
+    name: Official libXray JNI / arm64-v8a
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    steps:
+      - name: Resolve newest official libXray release
+        id: latest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$(gh api repos/XTLS/libXray/releases/latest --jq '.tag_name')"
+          test -n "$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout that exact released libXray source
+        uses: actions/checkout@v4
+        with:
+          repository: XTLS/libXray
+          ref: ${{ steps.latest.outputs.tag }}
+          path: upstream/libXray
+          persist-credentials: false
+
+      - name: Set up Java 17 for JNI headers
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Go required by libXray
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: upstream/libXray/go.mod
+          cache-dependency-path: upstream/libXray/go.sum
+
+      - name: Install Android NDK 27
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools'
+
+      - name: Prepare Android compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager --install 'ndk;27.2.12479018'
+          test -x "$ANDROID_HOME/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
+
+      - name: Compile official Xray c-shared API and standalone JNI adapter
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang="$ANDROID_HOME/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
+          output="$GITHUB_WORKSPACE/dist/xray/arm64-v8a"
+          mkdir -p "$output"
+          cd upstream/libXray
+          GOOS=android GOARCH=arm64 CGO_ENABLED=1 CC="$clang" \
+            go build -buildmode=c-shared -trimpath -ldflags='-s -w -checklinkname=0' \
+            -o "$output/libxraycore.so" ./cgo_bridge
+          cd "$GITHUB_WORKSPACE"
+          # Generate the same tiny JNI bridge used in XzyVpn; no app repo needed.
+          cat > "$RUNNER_TEMP/xray_jni.c" <<'XZY_JNI'
+          #include <jni.h>
+          #include <stddef.h>
+          extern char *CGoInvoke(char *requestJSON);
+          extern void CGoFree(char *value);
+          JNIEXPORT jstring JNICALL
+          Java_com_xzy23re_dev_service_NativeXrayBridge_nativeInvoke(JNIEnv *env, jclass type, jstring request) {
+              (void)type;
+              if (request == NULL) return NULL;
+              const char *input = (*env)->GetStringUTFChars(env, request, NULL);
+              if (input == NULL) return NULL;
+              char *result = CGoInvoke((char *)input);
+              (*env)->ReleaseStringUTFChars(env, request, input);
+              if (result == NULL) return NULL;
+              jstring output = (*env)->NewStringUTF(env, result);
+              CGoFree(result);
+              return output;
+          }
+          XZY_JNI
+          "$clang" -shared -fPIC -O2 \
+            -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
+            "$RUNNER_TEMP/xray_jni.c" -L"$output" -lxraycore \
+            -Wl,-soname,libxzyxrayjni.so -Wl,--no-undefined \
+            -o "$output/libxzyxrayjni.so"
+          cp upstream/libXray/LICENSE dist/xray/LIBXRAY_LICENSE.txt
+          git -C upstream/libXray rev-parse HEAD > dist/xray/SOURCE_COMMIT.txt
+          printf 'source=XTLS/libXray\nrelease=%s\n' '${{ steps.latest.outputs.tag }}' > dist/xray/SOURCE_RELEASE.txt
+          go version >> dist/xray/SOURCE_RELEASE.txt
+          (cd dist/xray && sha256sum arm64-v8a/*.so > SHA256SUMS.txt)
+          readelf -h "$output/libxraycore.so" | grep -F 'AArch64'
+          readelf -h "$output/libxzyxrayjni.so" | grep -F 'AArch64'
+
+      - name: Upload official Xray JNI binaries and provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: XzyVpn-Latest-Xray-Android-ARM64-JNI
+          path: dist/xray/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+  v2ray_arm64:
+    if: ${{ inputs.cores == 'both' || inputs.cores == 'v2ray' }}
+    name: Official V2Fly CLI / Android arm64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    steps:
+      - name: Resolve newest official V2Fly release
+        id: latest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$(gh api repos/v2fly/v2ray-core/releases/latest --jq '.tag_name')"
+          test -n "$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout released V2Fly source
+        uses: actions/checkout@v4
+        with:
+          repository: v2fly/v2ray-core
+          ref: ${{ steps.latest.outputs.tag }}
+          path: upstream/v2ray-core
+          persist-credentials: false
+
+      - name: Set up Go from official V2Fly module
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: upstream/v2ray-core/go.mod
+          cache-dependency-path: upstream/v2ray-core/go.sum
+
+      - name: Compile native Android arm64 V2Ray executable
+        working-directory: upstream/v2ray-core
+        shell: bash
+        env:
+          GOTOOLCHAIN: auto
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/dist/v2ray"
+          GOOS=android GOARCH=arm64 CGO_ENABLED=0 \
+            go build -trimpath -ldflags='-s -w -buildid=' \
+            -o "$GITHUB_WORKSPACE/dist/v2ray/v2ray" ./main
+          cp LICENSE "$GITHUB_WORKSPACE/dist/v2ray/V2FLY_LICENSE.txt"
+          git rev-parse HEAD > "$GITHUB_WORKSPACE/dist/v2ray/SOURCE_COMMIT.txt"
+          printf 'source=v2fly/v2ray-core\nrelease=%s\n' '${{ steps.latest.outputs.tag }}' \
+            > "$GITHUB_WORKSPACE/dist/v2ray/SOURCE_RELEASE.txt"
+          go version >> "$GITHUB_WORKSPACE/dist/v2ray/SOURCE_RELEASE.txt"
+          readelf -h "$GITHUB_WORKSPACE/dist/v2ray/v2ray" | grep -F 'AArch64'
+          (cd "$GITHUB_WORKSPACE/dist/v2ray" && sha256sum v2ray > SHA256SUMS.txt)
+
+      - name: Upload official V2Ray CLI and provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: XzyVpn-Latest-V2Fly-Android-ARM64-CLI
+          path: dist/v2ray/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+  v2ray_mobile_aar:
+    if: ${{ inputs.cores == 'both' || inputs.cores == 'v2ray' }}
+    name: V2Fly Android AAR via open-source gomobile wrapper
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Resolve latest official V2Fly release and wrapper release
+        id: latest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          echo "v2fly=$(gh api repos/v2fly/v2ray-core/releases/latest --jq '.tag_name')" >> "$GITHUB_OUTPUT"
+          echo "wrapper=$(gh api repos/2dust/AndroidLibV2rayLite/releases/latest --jq '.tag_name')" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout versioned AndroidLibV2rayLite wrapper (LGPL-3.0)
+        uses: actions/checkout@v4
+        with:
+          repository: 2dust/AndroidLibV2rayLite
+          ref: ${{ steps.latest.outputs.wrapper }}
+          path: upstream/AndroidLibV2rayLite
+          persist-credentials: false
+
+      - name: Set up Java for gomobile Java bindings
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Go for mobile wrapper
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: upstream/AndroidLibV2rayLite/go.mod
+          cache-dependency-path: upstream/AndroidLibV2rayLite/go.sum
+
+      - name: Set up Android SDK and NDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools'
+
+      - name: Install Android NDK 29
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager --install 'ndk;29.0.14206865' 'platforms;android-36'
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
+
+      - name: Build V2Fly Java/Android ARM64 AAR using current official core
+        working-directory: upstream/AndroidLibV2rayLite
+        shell: bash
+        env:
+          GOTOOLCHAIN: auto
+        run: |
+          set -euo pipefail
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
+          go get 'github.com/v2fly/v2ray-core/v5@${{ steps.latest.outputs.v2fly }}'
+          go mod tidy
+          mkdir -p assets data "$GITHUB_WORKSPACE/dist/v2ray-mobile"
+          bash gen_assets.sh download
+          cp data/*.dat assets/
+          gomobile init
+          gomobile bind -v -target android/arm64 -androidapi 21 \
+            -trimpath -ldflags='-s -w -buildid= -checklinkname=0' \
+            -o "$GITHUB_WORKSPACE/dist/v2ray-mobile/libv2ray.aar" ./
+          unzip -l "$GITHUB_WORKSPACE/dist/v2ray-mobile/libv2ray.aar" | grep -F 'jni/arm64-v8a/'
+          cp LICENSE "$GITHUB_WORKSPACE/dist/v2ray-mobile/WRAPPER_LGPL3_LICENSE.txt"
+          git rev-parse HEAD > "$GITHUB_WORKSPACE/dist/v2ray-mobile/WRAPPER_SOURCE_COMMIT.txt"
+          printf 'official_core=v2fly/v2ray-core/v5@%s\nwrapper=2dust/AndroidLibV2rayLite@%s\n' \
+            '${{ steps.latest.outputs.v2fly }}' '${{ steps.latest.outputs.wrapper }}' \
+            > "$GITHUB_WORKSPACE/dist/v2ray-mobile/SOURCE_RELEASE.txt"
+          go version >> "$GITHUB_WORKSPACE/dist/v2ray-mobile/SOURCE_RELEASE.txt"
+          (cd "$GITHUB_WORKSPACE/dist/v2ray-mobile" && sha256sum libv2ray.aar > SHA256SUMS.txt)
+
+      - name: Upload V2Fly Android bindings AAR (LGPL-3.0 wrapper)
+        uses: actions/upload-artifact@v4
+        with:
+          name: XzyVpn-Latest-V2Fly-Android-ARM64-AAR
+          path: dist/v2ray-mobile/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
