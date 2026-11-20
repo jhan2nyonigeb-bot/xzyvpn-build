@@ -1,0 +1,114 @@
+name: Build XzyVpn Xray 26.6.27 Android ARM64 JNI
+
+# Put this file in .github/workflows/ of your xzyvpn-build repository.
+# This workflow downloads upstream sources; your XzyVpn app source is not needed.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  xray-android-arm64:
+    name: Xray 26.6.27 / libXray Android ARM64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      XRAY_VERSION: "26.6.27"
+      LIBXRAY_TAG: "v26.6.27"
+      LIBXRAY_ANDROID_API: "21"
+      CGO_ENABLED: "1"
+
+    steps:
+      - name: Check out matching official libXray release
+        uses: actions/checkout@v4
+        with:
+          repository: XTLS/libXray
+          ref: v26.6.27
+          path: libXray
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Android NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r28c
+          add-to-path: true
+
+      - name: Build official libXray Android JNI AAR
+        working-directory: libXray
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 build/main.py android
+          test -s libXray.aar
+          test -s libXray-sources.jar
+          echo "libXray tag: ${LIBXRAY_TAG}"
+          echo "Go module dependency:"
+          go list -m github.com/xtls/xray-core || true
+
+      - name: Verify and package Android ARM64 JNI binding
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/xray-aar" "$GITHUB_WORKSPACE/output"
+          unzip -q libXray/libXray.aar -d "$RUNNER_TEMP/xray-aar"
+
+          jni_dir="$RUNNER_TEMP/xray-aar/jni/arm64-v8a"
+          test -d "$jni_dir"
+          test -n "$(find "$jni_dir" -maxdepth 1 -type f -name '*.so' -print -quit)"
+          test -s "$RUNNER_TEMP/xray-aar/classes.jar"
+
+          for so in "$jni_dir"/*.so; do
+            readelf -h "$so" | grep -q 'AArch64'
+          done
+
+          # Keep only ARM64 native code while preserving the AAR's Java binding.
+          find "$RUNNER_TEMP/xray-aar/jni" -mindepth 1 -maxdepth 1 \
+            -type d ! -name arm64-v8a -exec rm -r -- {} +
+          (
+            cd "$RUNNER_TEMP/xray-aar"
+            zip -qr "$GITHUB_WORKSPACE/output/libXray-${XRAY_VERSION}-arm64.aar" .
+          )
+
+          cp libXray/libXray-sources.jar "$GITHUB_WORKSPACE/output/"
+          mkdir -p "$GITHUB_WORKSPACE/output/jni/arm64-v8a"
+          cp "$jni_dir"/*.so "$GITHUB_WORKSPACE/output/jni/arm64-v8a/"
+          sha256sum "$GITHUB_WORKSPACE/output/libXray-${XRAY_VERSION}-arm64.aar" \
+            > "$GITHUB_WORKSPACE/output/SHA256SUMS.txt"
+
+          {
+            echo "XzyVpn Xray Android ARM64 JNI build"
+            echo "Upstream repository: XTLS/libXray"
+            echo "libXray tag: ${LIBXRAY_TAG}"
+            echo "Intended Xray-core: ${XRAY_VERSION}"
+            echo "Platform: android/arm64-v8a"
+            echo "Android min API: ${LIBXRAY_ANDROID_API}"
+            echo "Contents: ARM64 JNI .so, ARM64-only AAR, Java sources JAR"
+            echo "NOTE: Verify the core's reported version and API in XzyVpn before replacing any existing integration."
+          } > "$GITHUB_WORKSPACE/output/BUILD_INFO.txt"
+
+      - name: Upload downloadable ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: XzyVpn-Xray-26.6.27-Android-ARM64-JNI
+          path: output/
+          if-no-files-found: error
+          retention-days: 30
