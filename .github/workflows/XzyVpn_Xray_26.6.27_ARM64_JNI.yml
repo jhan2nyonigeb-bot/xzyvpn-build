@@ -41,7 +41,11 @@ jobs:
           java-version: "17"
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        # v3 requests the removed Android SDK "tools" package and fails.
+        # v4 installs current command-line tools and platform-tools instead.
+        uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
 
       - name: Set up Android NDK
         id: ndk
